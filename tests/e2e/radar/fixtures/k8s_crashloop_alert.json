@@ -1,0 +1,34 @@
+{
+  "alert_name": "CrashLoopBackOff: payments/api",
+  "pipeline_name": "radar",
+  "severity": "high",
+  "source": "radar",
+  "cluster": {
+    "name": "microk8s-cluster",
+    "platform": "generic",
+    "version": "v1.35.0"
+  },
+  "subject": {
+    "kind": "Pod",
+    "apiVersion": "v1",
+    "namespace": "payments",
+    "name": "api-7c9f-abc12",
+    "ownerChain": [
+      { "kind": "ReplicaSet", "name": "api-7c9f" },
+      { "kind": "Deployment", "name": "api" }
+    ]
+  },
+  "symptom": {
+    "reason": "CrashLoopBackOff",
+    "message": "back-off restarting failed container",
+    "detectedBy": "radar-audit"
+  },
+  "recentEvents": [
+    {
+      "type": "Warning",
+      "reason": "BackOff",
+      "count": 12,
+      "message": "Back-off restarting failed container app in pod api-7c9f-abc12"
+    }
+  ]
+}

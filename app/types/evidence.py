@@ -60,4 +60,5 @@ EvidenceSource = Literal[
     "hermes",
     "twilio",
     "redis",
+    "radar",
 ]

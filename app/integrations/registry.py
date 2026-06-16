@@ -38,6 +38,7 @@ from app.integrations._verification_adapters import (
     _verify_pagerduty,
     _verify_postgresql,
     _verify_rabbitmq,
+    _verify_radar,
     _verify_redis,
     _verify_sentry,
     _verify_signoz,
@@ -268,6 +269,12 @@ INTEGRATION_SPECS: tuple[IntegrationSpec, ...] = (
         direct_effective=True,
         setup_order=12,
         verify_order=39,
+    ),
+    IntegrationSpec(
+        service="radar",
+        verifier=_verify_radar,
+        direct_effective=True,
+        verify_order=29,
     ),
     IntegrationSpec(
         service="mysql",

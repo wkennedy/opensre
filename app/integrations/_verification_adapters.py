@@ -34,6 +34,7 @@ from app.integrations.mysql import build_mysql_config, validate_mysql_config
 from app.integrations.openclaw import build_openclaw_config, validate_openclaw_config
 from app.integrations.postgresql import build_postgresql_config, validate_postgresql_config
 from app.integrations.rabbitmq import build_rabbitmq_config, validate_rabbitmq_config
+from app.integrations.radar import build_radar_config, validate_radar_config
 from app.integrations.redis import build_redis_config, validate_redis_config
 from app.integrations.sentry import build_sentry_config, validate_sentry_config
 from app.integrations.signoz import build_signoz_config, validate_signoz_config
@@ -553,6 +554,11 @@ _verify_openclaw = build_validation_verifier(
     build_config=build_openclaw_config,
     validate_config=validate_openclaw_config,
 )
+_verify_radar = build_validation_verifier(
+    "radar",
+    build_config=build_radar_config,
+    validate_config=validate_radar_config,
+)
 _verify_signoz = build_validation_verifier(
     "signoz",
     build_config=build_signoz_config,
@@ -736,6 +742,7 @@ __all__ = [
     "_verify_postgresql",
     "_verify_dagster",
     "_verify_rabbitmq",
+    "_verify_radar",
     "_verify_redis",
     "_verify_sentry",
     "_verify_signoz",

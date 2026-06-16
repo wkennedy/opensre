@@ -44,6 +44,7 @@ _verify_opsgenie = _adapters._verify_opsgenie
 _verify_pagerduty = _adapters._verify_pagerduty
 _verify_postgresql = _adapters._verify_postgresql
 _verify_rabbitmq = _adapters._verify_rabbitmq
+_verify_radar = _adapters._verify_radar
 _verify_redis = _adapters._verify_redis
 _verify_sentry = _adapters._verify_sentry
 _verify_signoz = _adapters._verify_signoz
@@ -195,6 +196,7 @@ __all__ = [
     "_verify_postgresql",
     "_verify_rabbitmq",
     "_verify_redis",
+    "_verify_radar",
     "_verify_sentry",
     "_verify_signoz",
     "_verify_tempo",

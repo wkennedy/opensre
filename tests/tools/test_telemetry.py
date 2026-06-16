@@ -586,6 +586,70 @@ def _openclaw_call_tool_case() -> ToolFailureCase:
     )
 
 
+def _patch_radar_runtime(mp: pytest.MonkeyPatch) -> None:
+    """Shared patches for Radar cases — return a config and stub error rendering.
+
+    Each case still patches its specific failure point afterwards.
+    """
+    from app.tools import RadarMCPTool as mod
+
+    mp.setattr(
+        mod, "_resolve_config", MagicMock(return_value=SimpleNamespace(mode="streamable-http"))
+    )
+    mp.setattr(mod, "describe_radar_error", MagicMock(return_value="mocked error"))
+
+
+def _radar_list_case() -> ToolFailureCase:
+    def patch(mp: pytest.MonkeyPatch) -> None:
+        from app.tools import RadarMCPTool as mod
+
+        _patch_radar_runtime(mp)
+        mp.setattr(mod, "list_radar_mcp_tools", MagicMock(side_effect=RuntimeError("mcp")))
+
+    def invoke() -> dict[str, Any]:
+        from app.tools.RadarMCPTool import list_radar_bridge_tools
+
+        return list_radar_bridge_tools()
+
+    return ToolFailureCase("radar_list_tools", patch, invoke, "list_radar_tools", "radar")
+
+
+def _radar_invoke_case() -> ToolFailureCase:
+    def patch(mp: pytest.MonkeyPatch) -> None:
+        from app.tools import RadarMCPTool as mod
+
+        _patch_radar_runtime(mp)
+        mp.setattr(mod, "invoke_radar_mcp_tool", MagicMock(side_effect=RuntimeError("mcp")))
+
+    def invoke() -> dict[str, Any]:
+        from app.tools.RadarMCPTool import invoke_radar_tool
+
+        return invoke_radar_tool(tool_name="get_topology")
+
+    return ToolFailureCase("radar_invoke_tool", patch, invoke, "invoke_radar_tool", "radar")
+
+
+def _radar_dashboard_case() -> ToolFailureCase:
+    """Exercises ``_invoke`` via a targeted wrapper (``surface_tool_name`` plumbing).
+
+    The Sentry ``tool_name`` tag must be the registered surface name
+    (``get_radar_dashboard``), not the MCP-side tool id (``get_dashboard``).
+    """
+
+    def patch(mp: pytest.MonkeyPatch) -> None:
+        from app.tools import RadarMCPTool as mod
+
+        _patch_radar_runtime(mp)
+        mp.setattr(mod, "invoke_radar_mcp_tool", MagicMock(side_effect=RuntimeError("mcp")))
+
+    def invoke() -> dict[str, Any]:
+        from app.tools.RadarMCPTool import get_radar_dashboard
+
+        return get_radar_dashboard()
+
+    return ToolFailureCase("radar_dashboard", patch, invoke, "get_radar_dashboard", "radar")
+
+
 _TOOL_FAILURE_CASES: list[ToolFailureCase] = [
     _azure_case(),
     _openobserve_case(),
@@ -607,6 +671,9 @@ _TOOL_FAILURE_CASES: list[ToolFailureCase] = [
     _openclaw_search_case(),
     _openclaw_get_conversation_case(),
     _openclaw_call_tool_case(),
+    _radar_list_case(),
+    _radar_invoke_case(),
+    _radar_dashboard_case(),
 ]
 
 
@@ -798,6 +865,19 @@ _MIGRATED_TOOL_NAMES: frozenset[str] = frozenset(
         "get_openclaw_conversation",
         "send_openclaw_message",
         "call_openclaw_tool",
+        # Radar — all swallow sites in RadarMCPTool/__init__.py route through
+        # ``_invoke`` (targeted wrappers + invoke_radar_tool) or the
+        # ``list_radar_bridge_tools`` except block. The targeted wrappers other
+        # than ``get_radar_dashboard`` share ``_invoke`` and are listed in
+        # ``shared_code_path`` in the parametrised-coverage test below.
+        "list_radar_tools",
+        "invoke_radar_tool",
+        "get_radar_dashboard",
+        "get_radar_issues",
+        "get_radar_events",
+        "get_radar_pod_logs",
+        "diagnose_radar_resource",
+        "get_radar_neighborhood",
     }
 )
 
@@ -1040,7 +1120,16 @@ def test_every_migrated_tool_has_a_parameterised_failure_case() -> None:
     ``report_run_error`` path.
     """
     covered_by_parametrised = {case.expected_tool_name for case in _TOOL_FAILURE_CASES}
-    shared_code_path = {"send_openclaw_message"}
+    # Radar targeted wrappers share ``_invoke`` with ``get_radar_dashboard``
+    # (whose case already exercises that helper's ``report_run_error`` path).
+    shared_code_path = {
+        "send_openclaw_message",
+        "get_radar_issues",
+        "get_radar_events",
+        "get_radar_pod_logs",
+        "diagnose_radar_resource",
+        "get_radar_neighborhood",
+    }
     missing = _MIGRATED_TOOL_NAMES - covered_by_parametrised - shared_code_path
     assert missing == set(), (
         "Every name in _MIGRATED_TOOL_NAMES must have a parameterised "

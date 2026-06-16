@@ -49,6 +49,7 @@ from app.integrations.mysql import build_mysql_config
 from app.integrations.openclaw import build_openclaw_config
 from app.integrations.postgresql import build_postgresql_config
 from app.integrations.rabbitmq import build_rabbitmq_config
+from app.integrations.radar import build_radar_config
 from app.integrations.rds import (
     DEFAULT_RDS_REGION,
     build_rds_config,
@@ -648,6 +649,28 @@ def _classify_service_instance(
             config_dict = openclaw_config.model_dump()
             config_dict["connection_verified"] = True
             return config_dict, "openclaw"
+        return None, None
+
+    if key == "radar":
+        try:
+            radar_config = build_radar_config(
+                {
+                    "url": credentials.get("url", ""),
+                    "mode": credentials.get("mode", "streamable-http"),
+                    "auth_mode": credentials.get("auth_mode", "none"),
+                    "forwarded_user": credentials.get("forwarded_user", ""),
+                    "forwarded_groups": credentials.get("forwarded_groups", ""),
+                    "auth_token": credentials.get("auth_token", ""),
+                    "integration_id": record_id,
+                }
+            )
+        except Exception as exc:
+            _report_classify_failure(exc, integration=key, record_id=record_id)
+            return None, None
+        if radar_config.is_configured:
+            config_dict = radar_config.model_dump()
+            config_dict["connection_verified"] = True
+            return config_dict, "radar"
         return None, None
 
     if key == "mysql":
@@ -1677,6 +1700,31 @@ def load_env_integrations() -> list[dict[str, Any]]:
             )
         except Exception as exc:
             _report_env_loader_failure(exc, integration="openclaw")
+
+    radar_url = os.getenv("RADAR_MCP_URL", "").strip()
+    if radar_url:
+        try:
+            radar_config = build_radar_config(
+                {
+                    "url": radar_url,
+                    "mode": os.getenv("RADAR_MCP_MODE", "streamable-http").strip().lower(),
+                    "auth_mode": os.getenv("RADAR_AUTH_MODE", "none").strip().lower(),
+                    "forwarded_user": os.getenv("RADAR_FORWARDED_USER", "").strip(),
+                    "forwarded_groups": os.getenv("RADAR_FORWARDED_GROUPS", "").strip(),
+                    "auth_token": resolve_env_credential("RADAR_AUTH_TOKEN"),
+                }
+            )
+            integrations.append(
+                _active_env_record(
+                    "radar",
+                    {
+                        **radar_config.model_dump(exclude={"integration_id"}),
+                        "connection_verified": True,
+                    },
+                )
+            )
+        except Exception as exc:
+            _report_env_loader_failure(exc, integration="radar")
 
     mariadb_host = os.getenv("MARIADB_HOST", "").strip()
     mariadb_database = os.getenv("MARIADB_DATABASE", "").strip()

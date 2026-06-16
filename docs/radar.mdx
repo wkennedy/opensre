@@ -1,0 +1,137 @@
+---
+title: "Radar"
+description: "Give OpenSRE live Kubernetes context from Radar during investigations"
+---
+
+[Radar](https://github.com/skyhook-io/radar) is a Kubernetes visibility tool. It
+exposes a read-only Model Context Protocol (MCP) server with live cluster tools —
+topology, events, pod logs, audit findings, RBAC, and a heuristic `diagnose`.
+When you point OpenSRE at a Radar instance, the investigation agent can pull that
+live cluster context as ordinary tools while it works a Kubernetes incident.
+
+The bridge is **read-only**: OpenSRE only calls Radar's read tools. Radar's write
+tools (`apply_resource`, `patch_resource`, `manage_workload`, `manage_cronjob`,
+`manage_node`, `manage_gitops`) are intentionally not wired.
+
+## Quick reference
+
+| Command | What it does |
+| --- | --- |
+| `uv run opensre integrations verify radar` | Connect to Radar `/mcp` and list its tools |
+| `uv run opensre health` | Confirm OpenSRE is configured and ready |
+| `uv run opensre investigate -i <alert.json>` | Run an investigation; Radar tools are used when configured |
+
+## Setup
+
+### 1. Run Radar against your cluster
+
+Radar accesses your cluster with your kubeconfig and serves MCP at `/mcp`
+(default port `9280`). For example, from a built Radar image:
+
+```bash
+docker run -d --name radar --network host \
+  -v ~/.kube/config:/kube/config:ro radar:local \
+  --no-browser --kubeconfig /kube/config --port 9280
+```
+
+### 2. Point OpenSRE at Radar
+
+Set the endpoint (include or omit `/mcp` — OpenSRE appends it):
+
+```bash
+export RADAR_MCP_URL=http://localhost:9280/mcp
+```
+
+If Radar runs with `--auth-mode proxy`, supply a dedicated read-only identity.
+OpenSRE sends it as `X-Forwarded-User` / `X-Forwarded-Groups` request headers,
+which Radar maps to Kubernetes RBAC. Keep Radar network-isolated when using proxy
+auth, since it trusts those headers without validating them.
+
+```bash
+export RADAR_AUTH_MODE=proxy
+export RADAR_FORWARDED_USER=opensre
+export RADAR_FORWARDED_GROUPS=opensre-readonly
+```
+
+Radar has no static bearer / service-token path. For `--auth-mode oidc`, front
+Radar with an oauth2-proxy that emits the proxy headers.
+
+### 3. Verify the bridge
+
+```bash
+uv run opensre integrations verify radar
+```
+
+A healthy bridge reports the transport, endpoint, and the number of tools
+discovered, for example:
+
+```
+radar    local env    passed    Radar bridge connected via streamable-http (http://localhost:9280/mcp); discovered 25 tool(s).
+```
+
+## What the agent gets
+
+When Radar is configured, these tools become available to the investigation
+agent (and chat). A generic `invoke_radar_tool` keeps every other Radar read tool
+reachable too.
+
+| Tool | Backed by | Evidence |
+| --- | --- | --- |
+| `get_radar_dashboard` | Radar `get_dashboard` | Cluster/namespace health triage |
+| `get_radar_issues` | Radar `issues` | What's broken right now |
+| `get_radar_events` | Radar `get_events` | Recent Kubernetes events |
+| `get_radar_pod_logs` | Radar `get_pod_logs` | Pod/container logs (redaction-safe) |
+| `diagnose_radar_resource` | Radar `diagnose` | Heuristic diagnosis of a workload/GitOps resource |
+| `get_radar_neighborhood` | Radar `get_neighborhood` | Topology subgraph around a resource |
+| `list_radar_tools` | — | Discover the live Radar tool set |
+| `invoke_radar_tool` | any Radar read tool | Call a named read tool (e.g. `get_topology`, `search`, `top_resources`) |
+
+## Security
+
+- **Read-only**: only Radar read tools are wired; no cluster mutation.
+- **Redaction is structural in Radar**: Secret `.data`/`.stringData` is never
+  emitted (only key names), and env values and log lines matching secret patterns
+  are redacted before they leave the cluster. OpenSRE's own masking applies on top.
+- **Least privilege**: scope the OpenSRE identity (proxy mode) to a read-only
+  ClusterRole.
+
+## Accurate RCA
+
+Radar grounds a Kubernetes investigation in live cluster state, but pairs best
+with signal from your observability stack. For strong RCA, also configure at
+least one of:
+
+- `Grafana` or `Datadog` for metrics/logs/traces
+- `GitHub` for deploy/code-change context
+
+```bash
+uv run opensre integrations verify radar
+uv run opensre integrations verify grafana
+uv run opensre investigate -i tests/e2e/radar/fixtures/k8s_crashloop_alert.json
+```
+
+Contributor-facing regression coverage for this path lives in:
+
+- `tests/integrations/test_radar.py`
+- `tests/tools/test_radar_mcp_tool.py`
+- `tests/e2e/radar/` (e2e suite — see its [README](https://github.com/Tracer-Cloud/opensre/tree/main/tests/e2e/radar/README.md))
+
+## Environment variables
+
+| Variable | Meaning | Default |
+| --- | --- | --- |
+| `RADAR_MCP_URL` | Radar MCP endpoint (base or `/mcp` URL) | _none_ |
+| `RADAR_MCP_MODE` | Transport: `streamable-http` or `sse` | `streamable-http` |
+| `RADAR_AUTH_MODE` | `none` or `proxy` | `none` |
+| `RADAR_FORWARDED_USER` | Identity sent as `X-Forwarded-User` (proxy mode) | _empty_ |
+| `RADAR_FORWARDED_GROUPS` | Groups sent as `X-Forwarded-Groups` (proxy mode) | _empty_ |
+| `RADAR_AUTH_TOKEN` | Optional bearer token (only if Radar is fronted by an auth proxy) | _empty_ |
+
+## Troubleshooting
+
+- `Radar is not configured`: set `RADAR_MCP_URL`.
+- `HTTP 401`/`403` from Radar: Radar is enforcing auth. If it runs with
+  `--auth-mode proxy`, set `RADAR_AUTH_MODE=proxy` and `RADAR_FORWARDED_USER` to a
+  read-only identity bound in cluster RBAC.
+- `Could not connect to .../mcp`: confirm Radar is running and the URL/port are
+  reachable from where OpenSRE runs.

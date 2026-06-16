@@ -128,6 +128,7 @@
               "openobserve",
               "opsgenie",
               "pagerduty",
+              "radar",
               "sentry",
               "signoz",
               "tempo",
