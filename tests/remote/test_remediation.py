@@ -18,7 +18,9 @@ def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     return TestClient(remote_server.app, raise_server_exceptions=False)
 
 
-def _stub_plan(plan: RemediationPlan, monkeypatch: pytest.MonkeyPatch, capture: dict[str, Any]) -> None:
+def _stub_plan(
+    plan: RemediationPlan, monkeypatch: pytest.MonkeyPatch, capture: dict[str, Any]
+) -> None:
     """Make get_llm_for_reasoning().with_structured_output(M).invoke(p) return plan."""
 
     class _Structured:
@@ -37,12 +39,18 @@ def test_remediation_requires_api_key(client: TestClient) -> None:
     assert client.post("/remediation", json={}).status_code == 403
 
 
-def test_remediation_returns_typed_actions(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_remediation_returns_typed_actions(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
     capture: dict[str, Any] = {}
     plan = RemediationPlan(
         actions=[
-            RemediationAction(type="restart", kind="Deployment", namespace="payments", name="api", risk="low"),
-            RemediationAction(type="scale", kind="Deployment", namespace="payments", name="api", replicas=3),
+            RemediationAction(
+                type="restart", kind="Deployment", namespace="payments", name="api", risk="low"
+            ),
+            RemediationAction(
+                type="scale", kind="Deployment", namespace="payments", name="api", replicas=3
+            ),
         ],
         rationale="Restart to clear the wedged state; scale up for headroom.",
     )
@@ -65,10 +73,14 @@ def test_remediation_returns_typed_actions(client: TestClient, monkeypatch: pyte
     assert "payments" in capture["prompt"]
 
 
-def test_remediation_drops_scale_without_replicas(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_remediation_drops_scale_without_replicas(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
     plan = RemediationPlan(
         actions=[
-            RemediationAction(type="scale", kind="Deployment", namespace="ns", name="x"),  # no replicas
+            RemediationAction(
+                type="scale", kind="Deployment", namespace="ns", name="x"
+            ),  # no replicas
             RemediationAction(type="restart", kind="Deployment", namespace="ns", name="x"),
         ],
     )

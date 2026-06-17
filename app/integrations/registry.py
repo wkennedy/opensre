@@ -274,7 +274,7 @@ INTEGRATION_SPECS: tuple[IntegrationSpec, ...] = (
         service="radar",
         verifier=_verify_radar,
         direct_effective=True,
-        verify_order=29,
+        verify_order=44,
     ),
     IntegrationSpec(
         service="mysql",
