@@ -336,6 +336,43 @@ def remediation(req: RemediationRequest) -> RemediationPlan:
     return plan
 
 
+class FeedbackRequest(BaseModel):
+    investigation_id: str = ""
+    verdict: str = ""  # "up" | "down"
+    note: str = ""
+    root_cause: str = ""
+    kind: str = ""
+    namespace: str = ""
+    name: str = ""
+
+
+@app.post("/feedback")
+def feedback(req: FeedbackRequest) -> dict[str, bool]:
+    """Append a thumbs rating to a local eval dataset (best-effort quality loop).
+
+    The dataset (``<INVESTIGATIONS_DIR>/feedback.jsonl``) becomes the triage queue
+    for prompt/model/tooling improvement and can seed OpenSRE's eval harness.
+    """
+    record = {
+        "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "investigation_id": req.investigation_id,
+        "verdict": req.verdict,
+        "note": req.note,
+        "root_cause": req.root_cause,
+        "kind": req.kind,
+        "namespace": req.namespace,
+        "name": req.name,
+    }
+    try:
+        INVESTIGATIONS_DIR.mkdir(parents=True, exist_ok=True)
+        with (INVESTIGATIONS_DIR / "feedback.jsonl").open("a", encoding="utf-8") as fh:
+            fh.write(_json.dumps(record) + "\n")
+    except Exception as exc:
+        logger.warning("failed to record feedback: %s", exc)
+        raise HTTPException(status_code=500, detail="failed to record feedback") from exc
+    return {"ok": True}
+
+
 class InvestigationMeta(BaseModel):
     id: str
     filename: str
