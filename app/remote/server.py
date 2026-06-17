@@ -194,6 +194,81 @@ class InvestigateResponse(BaseModel):
     is_noise: bool = False
 
 
+class ChatTurn(BaseModel):
+    role: str = "user"  # "user" | "assistant"
+    content: str = ""
+
+
+class ChatContext(BaseModel):
+    """The completed investigation a follow-up is grounded in."""
+
+    alert_name: str | None = None
+    root_cause: str | None = None
+    problem_md: str | None = None
+    report: str | None = None
+
+
+class ChatRequest(BaseModel):
+    message: str
+    context: ChatContext = ChatContext()
+    history: list[ChatTurn] = []
+
+
+class ChatResponse(BaseModel):
+    reply: str
+
+
+def _chat_system_prompt(ctx: ChatContext) -> str:
+    parts = [
+        "You are an SRE assistant helping an engineer understand a completed "
+        "root-cause analysis (RCA) of a Kubernetes issue. Answer follow-up "
+        "questions grounded ONLY in the RCA below and the conversation so far. "
+        "If something cannot be determined from the RCA, say so plainly instead "
+        "of guessing. Be concise and concrete.",
+    ]
+    if ctx.alert_name:
+        parts.append(f"\n## Alert\n{ctx.alert_name}")
+    if ctx.root_cause:
+        parts.append(f"\n## Root cause\n{ctx.root_cause}")
+    if ctx.problem_md:
+        parts.append(f"\n## Problem\n{ctx.problem_md}")
+    if ctx.report:
+        parts.append(f"\n## Full report\n{ctx.report}")
+    return "\n".join(parts)
+
+
+@app.post("/chat", response_model=ChatResponse)
+def chat(req: ChatRequest) -> ChatResponse:
+    """Answer a follow-up question grounded in a completed investigation.
+
+    Stateless: the caller supplies the RCA context + prior turns, so no
+    server-side conversation state is kept. Answers are grounded in the report;
+    follow-ups do not run fresh investigation tools (full tool-using resume is a
+    deferred enhancement — see integration/proposals/05-conversational-followup.md).
+    """
+    from app.services.llm_client import get_llm_for_reasoning
+
+    question = req.message.strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="message is required")
+
+    messages: list[dict[str, str]] = [
+        {"role": "system", "content": _chat_system_prompt(req.context)}
+    ]
+    for turn in req.history:
+        role = turn.role if turn.role in ("user", "assistant") else "user"
+        if turn.content.strip():
+            messages.append({"role": role, "content": turn.content})
+    messages.append({"role": "user", "content": question})
+
+    try:
+        response = get_llm_for_reasoning().invoke(messages)
+    except Exception as exc:
+        logger.warning("chat follow-up failed: %s", exc)
+        raise HTTPException(status_code=502, detail=f"LLM call failed: {exc}") from exc
+    return ChatResponse(reply=str(response.content).strip())
+
+
 class InvestigationMeta(BaseModel):
     id: str
     filename: str
