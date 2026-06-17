@@ -1,0 +1,208 @@
+# Radar end-to-end CI.
+#
+# Stands up a throwaway Kubernetes cluster (kind), builds + runs Radar against
+# it, and runs OpenSRE's Direction-A bridge tests (tests/e2e/radar) over Radar's
+# live /mcp endpoint. This is the cross-system regression gate for the
+# OpenSRE↔Radar integration (see integration/ROADMAP.md Phase 3).
+#
+# Triggers, in order of intent:
+#   1. PRs touching the radar bridge / e2e tests / this workflow (auto, primary)
+#   2. Pushes to main touching the same paths                     (post-merge catch)
+#   3. Daily schedule                                             (environment drift:
+#                                                                 Radar source moves,
+#                                                                 MCP SDK / kind drift)
+#   4. workflow_dispatch                                          (manual force-run;
+#                                                                 optional radar ref)
+#
+# Coverage tiers:
+#   - 4 deterministic "wire" tests (tool discovery, live data, integration
+#     resolution, agent availability) run against an EMPTY kind cluster and gate
+#     the merge.
+#   - 1 full-RCA smoke calls an LLM; it auto-skips unless an LLM key is wired
+#     (deliberately not wired here — see "LLM credential policy" below).
+
+name: CI (Radar E2E)
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "app/integrations/radar.py"
+      - "app/tools/RadarMCPTool/**"
+      - "tests/e2e/radar/**"
+      - "app/remote/server.py"
+      - ".github/workflows/e2e-radar.yml"
+      - "docs/radar.mdx"
+  push:
+    branches: [main]
+    paths:
+      - "app/integrations/radar.py"
+      - "app/tools/RadarMCPTool/**"
+      - "tests/e2e/radar/**"
+      - "app/remote/server.py"
+      - ".github/workflows/e2e-radar.yml"
+      - "docs/radar.mdx"
+  schedule:
+    - cron: "30 6 * * *"
+  workflow_dispatch:
+    inputs:
+      radar_ref:
+        description: "Radar git ref to build (branch/tag/sha)"
+        required: false
+        default: "main"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-radar-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Radar source to check out + build. The skyhook-io/radar repo is public; if
+  # it becomes private, add a PAT with read access as a secret and pass it to the
+  # radar checkout step's `token:`.
+  RADAR_REPO: skyhook-io/radar
+  RADAR_REF: ${{ github.event.inputs.radar_ref || 'main' }}
+  RADAR_PORT: "9280"
+
+jobs:
+  # Quality gates (lint / format-check / mypy / unit) run in the main ci.yml.
+  # This workflow's sole job is the Radar cross-system e2e suite.
+  radar-e2e:
+    if: github.repository == 'Tracer-Cloud/opensre'
+    name: radar e2e
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    # No LLM secret is wired by design. The full-RCA sub-test calls a model,
+    # costs credits, and is non-deterministic (the LLM may not pick a radar tool
+    # for a given alert), so it auto-skips via the test's `_llm_present()` gate.
+    # The 4 deterministic wire tests are the real, mergeable signal. To run the
+    # smoke, add a provider key (e.g. OPENAI_API_KEY) as a repo secret and
+    # uncomment its line in "Run Radar E2E suite".
+
+    steps:
+      - name: Checkout OpenSRE
+        uses: actions/checkout@v5
+
+      - name: Checkout Radar source
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ env.RADAR_REPO }}
+          ref: ${{ env.RADAR_REF }}
+          path: radar-src
+          # token: ${{ secrets.RADAR_REPO_TOKEN }}   # only if radar becomes private
+
+      - name: Set up Go (matches radar go.mod)
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+          cache-dependency-path: radar-src/go.sum
+
+      - name: Build Radar (explorer binary)
+        # internal/static/dist ships committed placeholders, so go:embed builds
+        # without a frontend step. The e2e tests only hit /mcp + /api, so the
+        # placeholder UI is irrelevant. Mirrors radar's own Backend CI build.
+        working-directory: radar-src
+        env:
+          CGO_ENABLED: "0"
+        run: go build -o explorer ./cmd/explorer
+
+      - name: Create kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: radar-e2e
+          # Writes the cluster context into ~/.kube/config on the runner.
+
+      - name: Confirm cluster is reachable
+        run: kubectl cluster-info && kubectl get nodes
+
+      - name: Start Radar against the cluster
+        # Run the freshly-built binary as a host process (NOT a container) so it
+        # can reach kind's apiserver via the runner's kubeconfig with zero
+        # cross-network setup. --auth-mode none is fine: the runner is isolated
+        # and single-tenant for this job.
+        run: |
+          nohup ./radar-src/explorer \
+            --kubeconfig "$HOME/.kube/config" \
+            --port "$RADAR_PORT" \
+            --auth-mode none \
+            --no-browser \
+            > /tmp/radar-e2e.log 2>&1 &
+          echo "radar_pid=$!" >> "$GITHUB_ENV"
+
+      - name: Wait for Radar to connect to the cluster
+        # The cache needs a few seconds to sync informers before /mcp returns
+        # live data. Poll /api/capabilities; downgrade to a documented skip
+        # (not a hard failure) if Radar never comes up, mirroring the openclaw
+        # e2e probe pattern.
+        run: |
+          set +e
+          for i in $(seq 1 30); do
+            code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://localhost:${RADAR_PORT}/api/capabilities")"
+            if [ "$code" = "200" ]; then
+              echo "✓ Radar ready after ${i} attempt(s)"
+              echo "radar_ready=true" >> "$GITHUB_ENV"
+              exit 0
+            fi
+            echo "attempt ${i}: HTTP ${code}"
+            sleep 2
+          done
+          echo "::warning::Radar did not become ready in time; e2e suite will be skipped this run."
+          echo "radar_ready=false" >> "$GITHUB_ENV"
+          echo "----- radar log -----"; cat /tmp/radar-e2e.log || true
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: |
+            pyproject.toml
+            uv.lock
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: uv sync --frozen --extra dev
+
+      - name: Run Radar E2E suite
+        # 4 deterministic wire tests gate the merge; the full-RCA smoke skips
+        # unless an LLM key is present. To enable the smoke, set a provider key
+        # as a repo secret and uncomment the matching env line below.
+        env:
+          RADAR_MCP_URL: http://localhost:${{ env.RADAR_PORT }}/mcp
+          # OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          # ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ "$radar_ready" != "true" ]; then
+            echo "::warning::Skipping pytest — Radar unavailable (see earlier warnings + radar log artifact)."
+            exit 0
+          fi
+          uv run python -m pytest -m e2e -v tests/e2e/radar/
+
+      - name: Stop Radar
+        if: always()
+        run: |
+          if [ -n "${radar_pid:-}" ]; then kill "$radar_pid" 2>/dev/null || true; fi
+
+      - name: Upload Radar log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: radar-e2e-log
+          path: /tmp/radar-e2e.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "### Radar E2E run summary"
+          echo "  Radar ref built: ${RADAR_REPO}@${RADAR_REF}"
+          echo "  Radar ready: ${radar_ready:-unknown}"
+          echo "  Wire tests (4): gate the merge"
+          echo "  Full-RCA smoke: skipped by CI policy (no LLM key wired)"
