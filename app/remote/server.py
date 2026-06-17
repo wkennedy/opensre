@@ -83,6 +83,39 @@ _INSTANCE_METADATA: dict[str, str | None] = {
 _REPORTED_REMOTE_EVENTS: set[tuple[str, str]] = set()
 logger = logging.getLogger(__name__)
 
+# OpenSRE↔Radar interface contract version this server is built against. Radar
+# stamps the same value in the alert envelope it sends (see
+# integration/INTERFACE_CONTRACT.md §6). This is a soft handshake: a differing
+# *major* signals a breaking skew and is logged; minor/patch differences are
+# additive and tolerated (the bridge already ignores unknown fields and adapts
+# to Radar's live tool list at runtime).
+RADAR_CONTRACT_VERSION = "0.1.0"
+
+
+def _check_contract_version(raw_alert: dict[str, Any]) -> None:
+    """Warn (never fail) when an inbound Radar envelope's contract major skews.
+
+    Only fires for envelopes Radar tags as its own (``source == "radar"``) that
+    carry a ``contractVersion``. Unparseable or absent versions are ignored —
+    non-Radar callers (the original alert sources) never set this field.
+    """
+    if str(raw_alert.get("source", "")).lower() != "radar":
+        return
+    theirs = raw_alert.get("contractVersion")
+    if not isinstance(theirs, str) or not theirs.strip():
+        return
+    # Tolerate a "-draft"/pre-release suffix; compare the leading numeric major.
+    their_major = theirs.strip().split(".", 1)[0].split("-", 1)[0]
+    our_major = RADAR_CONTRACT_VERSION.split(".", 1)[0]
+    if their_major != our_major:
+        logger.warning(
+            "Radar alert envelope contractVersion %s is a different major than "
+            "this server's %s — fields/behaviour may have shifted; proceeding "
+            "best-effort.",
+            theirs,
+            RADAR_CONTRACT_VERSION,
+        )
+
 
 def _remote_report_key(event: str, extras: dict[str, Any] | None = None) -> tuple[str, str]:
     return (event, str(extras or ""))
@@ -1008,6 +1041,7 @@ def _save_investigation(
 def _normalized_request_alert(req: InvestigateRequest) -> dict[str, Any]:
     """Merge optional Vercel URL input into the alert and resolve it when present."""
     raw_alert = dict(req.raw_alert)
+    _check_contract_version(raw_alert)
     if req.vercel_url:
         raw_alert.setdefault("vercel_url", req.vercel_url)
         raw_alert.setdefault("vercel_log_url", req.vercel_url)
