@@ -406,6 +406,102 @@ def feedback(req: FeedbackRequest) -> dict[str, bool]:
     return {"ok": True}
 
 
+class PublishRequest(BaseModel):
+    """A completed diagnosis Radar asks OpenSRE to publish to a channel.
+
+    Radar owns the deep link (``resource_url``); OpenSRE owns the channel
+    credentials (its existing Telegram/Slack/… config). v1 supports Telegram.
+    """
+
+    channel: str = "telegram"
+    root_cause: str = ""
+    report: str = ""
+    kind: str = ""
+    namespace: str = ""
+    name: str = ""
+    resource_url: str = ""  # Radar deep link back to the resource
+    validity_score: float | None = None
+    is_noise: bool = False
+    trigger: str = ""  # manual | auto
+    chat_id: str = ""  # optional target override; else TELEGRAM_DEFAULT_CHAT_ID
+
+
+class PublishResponse(BaseModel):
+    published: bool
+    channel: str = ""
+    reason: str = ""  # why not published (noise / not configured / send error)
+
+
+def _resolve_telegram_target(chat_id_override: str) -> tuple[str, str]:
+    """Resolve (bot_token, chat_id) reusing OpenSRE's existing Telegram config.
+
+    bot_token: integration store > ``TELEGRAM_BOT_TOKEN`` (via the scheduler's
+    shared resolver). chat_id: request override > ``TELEGRAM_DEFAULT_CHAT_ID``.
+    """
+    from app.scheduler.credentials import resolve_telegram_credentials
+
+    bot_token = resolve_telegram_credentials({}).get("bot_token", "")
+    chat_id = (chat_id_override or "").strip() or os.getenv("TELEGRAM_DEFAULT_CHAT_ID", "").strip()
+    return bot_token, chat_id
+
+
+def _format_diagnosis_for_telegram(req: PublishRequest) -> str:
+    """Build a Telegram HTML message for a Radar diagnosis. Escapes all dynamic
+    text; ``send_telegram_report`` handles length-safe truncation."""
+    import html as _html
+
+    target = "/".join(p for p in (req.kind, req.namespace, req.name) if p)
+    lines = [f"🔎 <b>Radar diagnosis</b> — <code>{_html.escape(target)}</code>"]
+    meta: list[str] = []
+    if req.trigger:
+        meta.append(f"trigger: {_html.escape(req.trigger)}")
+    if req.validity_score is not None:
+        meta.append(f"confidence: {int(req.validity_score * 100 + 0.5)}%")
+    if meta:
+        lines.append(" · ".join(meta))
+    rc = (req.root_cause or "").strip() or "(no root cause identified)"
+    lines.append(f"\n<b>Root cause</b>\n{_html.escape(rc)}")
+    report = (req.report or "").strip()
+    if report:
+        lines.append(f"\n{_html.escape(report)}")
+    if req.resource_url:
+        url = _html.escape(req.resource_url, quote=True)
+        lines.append(f'\n<a href="{url}">Open in Radar</a>')
+    return "\n".join(lines)
+
+
+@app.post("/publish")
+def publish(req: PublishRequest) -> PublishResponse:
+    """Publish a completed (Radar-originated) diagnosis to a delivery channel.
+
+    Reuses OpenSRE's mature delivery layer so Radar diagnoses land in the same
+    channels teams already live in. v1 wires **Telegram** (``app/utils/
+    telegram_delivery.py``). Best-effort: suppresses noise, no-ops cleanly when
+    the channel isn't configured, and never raises on a delivery failure.
+    """
+    if req.channel != "telegram":
+        return PublishResponse(published=False, channel=req.channel, reason="unsupported channel")
+    if req.is_noise:
+        return PublishResponse(published=False, channel="telegram", reason="noise suppressed")
+
+    bot_token, chat_id = _resolve_telegram_target(req.chat_id)
+    if not bot_token or not chat_id:
+        return PublishResponse(
+            published=False, channel="telegram", reason="telegram not configured"
+        )
+
+    from app.utils.telegram_delivery import send_telegram_report
+
+    message = _format_diagnosis_for_telegram(req)
+    ok, error = send_telegram_report(
+        message, {"bot_token": bot_token, "chat_id": chat_id}, parse_mode="HTML"
+    )
+    if not ok:
+        logger.warning("telegram publish failed: %s", error)
+        return PublishResponse(published=False, channel="telegram", reason=error or "send failed")
+    return PublishResponse(published=True, channel="telegram")
+
+
 class InvestigationMeta(BaseModel):
     id: str
     filename: str

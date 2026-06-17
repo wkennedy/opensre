@@ -127,6 +127,23 @@ Contributor-facing regression coverage for this path lives in:
 | `RADAR_FORWARDED_GROUPS` | Groups sent as `X-Forwarded-Groups` (proxy mode) | _empty_ |
 | `RADAR_AUTH_TOKEN` | Optional bearer token (only if Radar is fronted by an auth proxy) | _empty_ |
 
+## Publishing diagnoses to Telegram
+
+When Radar triggers a diagnosis, it can ask OpenSRE to publish the result through
+OpenSRE's own delivery layer so it lands in the channels your team already uses.
+OpenSRE reuses its existing **Telegram** delivery for this — set the same
+credentials the watchdog uses and OpenSRE will format and send a Radar diagnosis
+(with a deep link back to the resource) on completion:
+
+| Variable | Meaning |
+| --- | --- |
+| `TELEGRAM_BOT_TOKEN` | Bot token from @BotFather |
+| `TELEGRAM_DEFAULT_CHAT_ID` | Target chat id |
+
+Then run Radar with `--opensre-notify` (off by default). OpenSRE owns the
+credentials; Radar only sends the diagnosis + deep link to OpenSRE's `/publish`
+endpoint. Noise/failed diagnoses are suppressed and delivery never blocks.
+
 ## Troubleshooting
 
 - `Radar is not configured`: set `RADAR_MCP_URL`.
