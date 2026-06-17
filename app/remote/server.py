@@ -25,7 +25,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from dotenv import load_dotenv
 from fastapi import (
@@ -267,6 +267,73 @@ def chat(req: ChatRequest) -> ChatResponse:
         logger.warning("chat follow-up failed: %s", exc)
         raise HTTPException(status_code=502, detail=f"LLM call failed: {exc}") from exc
     return ChatResponse(reply=str(response.content).strip())
+
+
+class RemediationSubject(BaseModel):
+    kind: str = ""
+    namespace: str = ""
+    name: str = ""
+
+
+class RemediationRequest(BaseModel):
+    root_cause: str = ""
+    report: str = ""
+    subject: RemediationSubject = RemediationSubject()
+
+
+class RemediationAction(BaseModel):
+    # SAFE, reversible action types only. Patch/apply/delete are intentionally
+    # excluded from this allowlist (see integration/proposals/01-remediation-loop.md).
+    type: Literal["restart", "scale"]
+    kind: str = ""
+    namespace: str = ""
+    name: str = ""
+    replicas: int | None = None  # required for "scale"
+    description: str = ""
+    risk: Literal["low", "medium", "high"] = "medium"
+
+
+class RemediationPlan(BaseModel):
+    actions: list[RemediationAction] = []
+    rationale: str = ""
+
+
+@app.post("/remediation", response_model=RemediationPlan)
+def remediation(req: RemediationRequest) -> RemediationPlan:
+    """Propose SAFE, typed remediation actions for a completed investigation.
+
+    Constrained to a small allowlist (restart, scale) so the result is
+    machine-executable by Radar with human confirmation. Returns an empty plan
+    when no safe action applies (e.g. the fix is a code/image/config change).
+    """
+    from app.services.llm_client import get_llm_for_reasoning
+
+    subj = req.subject
+    prompt = (
+        "You are an SRE proposing SAFE, reversible remediation actions for a "
+        "Kubernetes issue, based on the root-cause analysis below. You may ONLY "
+        "propose these action types:\n"
+        "- restart: roll the workload's pods (no spec change)\n"
+        "- scale: set the workload's replica count (include an integer `replicas`)\n"
+        f"Target workload: kind={subj.kind!r} namespace={subj.namespace!r} name={subj.name!r}.\n"
+        "Propose 0-2 actions that would plausibly resolve the root cause. If no "
+        "action from the allowed types would safely help (e.g. the real fix is a "
+        "code, image, or config change), return an empty actions list and explain "
+        "why in `rationale`. Never invent action types beyond restart/scale. Set "
+        "each action's kind/namespace/name to the target workload.\n\n"
+        f"## Root cause\n{req.root_cause}\n\n## Report\n{req.report}\n"
+    )
+    try:
+        plan: RemediationPlan = (
+            get_llm_for_reasoning().with_structured_output(RemediationPlan).invoke(prompt)
+        )
+    except Exception as exc:
+        logger.warning("remediation planning failed: %s", exc)
+        raise HTTPException(status_code=502, detail=f"LLM call failed: {exc}") from exc
+
+    # Defensive: drop scale actions missing a replica count.
+    plan.actions = [a for a in plan.actions if a.type != "scale" or a.replicas is not None]
+    return plan
 
 
 class InvestigationMeta(BaseModel):
